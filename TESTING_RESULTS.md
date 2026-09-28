@@ -145,8 +145,12 @@ Fan RPM responded to the change, and the original duty was restored afterwards.
 - **No other board.** Everything above is one MSI X870E. The DMI board list
   covers several MSI models; the `msi_alt` fan register mapping is exercised
   only if the DMI match fires.
-- **No other kernel at runtime.** CI builds against 5.15 through 6.17 and
-  mainline. Runtime behaviour is verified only on 7.2.2.
+- **No other kernel at runtime.** CI builds against 5.15, 6.8, 6.11, 6.12,
+  6.14, 6.17 and mainline. Runtime behaviour is verified only on 7.2.2.
+- **CI cannot cover EOL kernels.** 23.10 and 24.10 were in the matrix and could
+  not install anything: their apt archives are removed once a release is
+  supported no longer. Long-term-supported releases only, which means the
+  oldest kernel covered is whatever the oldest supported LTS ships.
 - **The `start_fan_cfg_update` timeout path** propagates `-ETIMEDOUT` now, but
   has not been observed to fire. Triggering it requires an EC that stops
   responding mid-handshake, which is not reproducible on demand.

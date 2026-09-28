@@ -44,21 +44,24 @@ jobs:
           # has no headers for it, the newest available is used and the job says
           # so, because a stale pin is not a kernel incompatibility.
           #
+          # Only releases still in a distribution's archive appear here. 23.10
+          # (mantic) and 24.10 (oracular) reached end of life and their apt
+          # archives were removed, so those images could not install anything at
+          # all -- a job failure that says nothing about the driver. 22.04 and
+          # 24.04 cover the long-term-supported kernels either side of 6.11.
+          #
           # Both sides of the one version boundary the driver carries, 6.11
           # for platform_driver.remove.
           - name: 5.15 (Ubuntu 22.04 LTS)
             image: ubuntu:22.04
             kver: 5.15.0-139-generic
-          - name: 6.5 (Ubuntu 23.10)
-            image: ubuntu:23.10
-            kver: 6.5.0-35-generic
           - name: 6.8 (Ubuntu 24.04 LTS)
             image: ubuntu:24.04
             kver: 6.8.0-60-generic
 
           # >= 6.11: remove() returns void.
-          - name: 6.11 (Ubuntu 24.10)
-            image: ubuntu:24.10
+          - name: 6.11 (Ubuntu 25.04)
+            image: ubuntu:25.04
             kver: 6.11.0-28-generic
           - name: 6.12 (Debian 13)
             image: debian:trixie
@@ -119,6 +122,16 @@ jobs:
             [ -z "$pick" ] && { echo "::error::no kernel-devel in this image"; exit 1; }
             echo "installing: ${pick}"
             $SUDO dnf install -y "$pick"
+            # kernel-devel unpacks headers into /usr/src/kernels/<version> and
+            # does not create a /lib/modules entry of its own. Link one so the
+            # rest of the job, and the Makefile, can find the build tree.
+            for kd in /usr/src/kernels/*/; do
+              [ -d "$kd" ] || continue
+              v=$(basename "$kd")
+              [ -e "/lib/modules/${v}/build" ] && continue
+              $SUDO mkdir -p "/lib/modules/${v}"
+              $SUDO ln -sfn "${kd%/}" "/lib/modules/${v}/build"
+            done
           else
             pkgmgr=apt
             $SUDO apt-get update -qq
@@ -214,10 +227,10 @@ jobs:
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
-          $SUDO apt-get update -qq
-          $SUDO apt-get install -y --no-install-recommends \
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
             bc binutils dkms gcc git kmod make
-          $SUDO apt-get install -y --no-install-recommends "linux-headers-$(uname -r)"
+          sudo apt-get install -y --no-install-recommends "linux-headers-$(uname -r)"
 
       - name: Stage the sources the way dkms.conf expects
         shell: bash
