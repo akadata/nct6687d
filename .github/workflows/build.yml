@@ -1,0 +1,218 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name: build
+
+# Build the driver against a spread of kernel versions so that a kernel API
+# change breaks CI instead of reaching a user at `modprobe` time. The two
+# version boundaries the driver actually cares about are:
+#
+#   6.11  platform_driver.remove changed from int to void
+#   6.13  sensor sysfs structs moved from hwmon.h to linux/hwmon-sysfs.h
+#
+# Both sides of each boundary are covered below.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Pre-6.11: remove() must return int, hwmon-sysfs.h must not be included.
+          - name: 5.15 (Ubuntu 22.04 LTS)
+            container: ubuntu:22.04
+            kver: 5.15.0-139-generic
+          - name: 6.5 (Ubuntu 23.10)
+            container: ubuntu:23.10
+            kver: 6.5.0-35-generic
+          - name: 6.8 (Ubuntu 24.04 LTS)
+            container: ubuntu:24.04
+            kver: 6.8.0-60-generic
+
+          # 6.11 <= x < 6.13: remove() returns void, hwmon-sysfs.h must not be
+          # included. This is the narrow window where both gates differ.
+          - name: 6.11 (Ubuntu 24.10)
+            container: ubuntu:24.10
+            kver: 6.11.0-28-generic
+          - name: 6.12 (Debian 13)
+            container: debian:trixie
+            debian: true
+            kver: 6.12.38+deb13-amd64
+
+          # >= 6.13: both gates flip, hwmon-sysfs.h is required.
+          - name: 6.14 (Debian 13 updates)
+            container: debian:trixie
+            debian: true
+            kver: 6.14.0-1-amd64
+          - name: 6.17 (Fedora 42)
+            container: fedora:42
+            fedora: true
+            kver: 6.17.4-200.fc42.x86_64
+          - name: tip (newest in image)
+            container: debian:trixie
+            debian: true
+            kver: tip
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies and kernel headers
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            bc binutils kmod make gcc linux-headers-common
+          # The exact -<abi> kernel name drifts as a distro ships updates, so
+          # install the headers metapackage and then resolve the real directory
+          # rather than pinning a version that will eventually 404.
+          apt-get install -y --no-install-recommends linux-headers-generic || true
+          apt-get install -y --no-install-recommends "linux-headers-$(uname -r)" || true
+
+      - name: Install build dependencies and kernel headers (Debian)
+        if: matrix.debian
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            bc binutils gcc git kmod make
+          # Debian ships headers per kernel-image package. Pull the newest one
+          # available in the image's archive.
+          pkg=$(apt-cache search --names-only '^linux-headers-[0-9].*-amd64$' \
+                | awk '{print $1}' | sort -V | tail -1)
+          echo "installing headers: $pkg"
+          apt-get install -y --no-install-recommends "$pkg"
+
+      - name: Install build dependencies and kernel headers (Fedora)
+        if: matrix.fedora
+        shell: bash
+        run: |
+          set -euo pipefail
+          dnf install -y bc elfutils-libelf-devel gcc git kernel-devel make
+          # kernel-devel pulls the running kernel's headers; for a specific
+          # kernel install the matching version explicitly.
+          dnf install -y "kernel-devel-$(uname -r)" || true
+
+      - name: Resolve available kernel build trees
+        id: kernels
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "requested: ${{ matrix.kver }}"
+          # 'tip' means "build against whatever this image provides", which is
+          # how mainline regressions get noticed early.
+          if [ "${{ matrix.kver }}" = "tip" ]; then
+            kver=$(ls -1 /lib/modules 2>/dev/null | sort -V | tail -1)
+          else
+            kver=${{ matrix.kver }}
+          fi
+          if [ ! -d "/lib/modules/${kver}/build" ]; then
+            kver=$(ls -1 /lib/modules 2>/dev/null | sort -V | tail -1)
+          fi
+          if [ -z "${kver}" ] || [ ! -d "/lib/modules/${kver}/build" ]; then
+            echo "::error::no kernel build tree found; cannot build"
+            ls -la /lib/modules || true
+            exit 1
+          fi
+          echo "building against: ${kver}"
+          echo "kver=${kver}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          make kver="${{ steps.kernels.outputs.kver }}" build
+          ls -l build/"${{ steps.kernels.outputs.kver }}"/nct6687.ko
+          modinfo build/"${{ steps.kernels.outputs.kver }}"/nct6687.ko | head -5
+
+      - name: Check for warnings
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Rebuild verbosely and fail on any compiler diagnostic. A driver that
+          # only builds clean by accident is not buildable on the next kernel.
+          make kver="${{ steps.kernels.outputs.kver }}" clean
+          out=$(make kver="${{ steps.kernels.outputs.kver }}" build 2>&1) || {
+            echo "$out"; exit 1; }
+          echo "$out"
+          # The pahole BTF version note is emitted by kbuild tooling, not by
+          # compiling this driver, and it varies with the host's dwarves package.
+          # Everything else is a diagnostic we want to fail on.
+          if echo "$out" | grep -Ei '\bwarning\b|error:' | grep -v 'pahole version differs'; then
+            echo "::error::compiler diagnostics present"
+            exit 1
+          fi
+          echo "no compiler diagnostics"
+
+  dkms:
+    name: dkms round-trip
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dkms and the running kernel's headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            bc binutils dkms gcc git kmod make
+          apt-get install -y --no-install-recommends "linux-headers-$(uname -r)"
+
+      - name: Stage the sources the way dkms.conf expects
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /usr/src/nct6687d-1
+          sudo cp dkms.conf Makefile nct6687.c README.md /usr/src/nct6687d-1/
+
+      - name: dkms build
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo dkms build -m nct6687d -v 1 -k "$(uname -r)"
+
+      - name: dkms status is built
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=$(dkms status -m nct6687d -v 1)
+          echo "$status"
+          echo "$status" | grep -q "built"
+
+      - name: dkms remove
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo dkms remove -m nct6687d -v 1 --all
+          sudo rm -rf /usr/src/nct6687d-1

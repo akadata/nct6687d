@@ -32,14 +32,45 @@
 #include <linux/io.h>
 #include <linux/jiffies.h>
 #include <linux/hwmon.h>
-#include <linux/hwmon-sysfs.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/version.h>
 
 #define DRVNAME "nct6687"
+
+/*
+ * Kernel version support
+ * ------------------------
+ * Collected here so every conditional in this driver is visible in one place
+ * rather than scattered through the file.
+ *
+ * v6.11 (kernel commit 0edb555a6) changed platform_driver.remove from
+ *	 int  (*remove)(struct platform_device *)
+ * to
+ *	 void (*remove)(struct platform_device *)
+ * Defining the return type as a macro lets the body be written once, and
+ * avoids needing a -Wincompatible-pointer-types pragma around the
+ * platform_driver struct on old kernels.
+ *
+ * v6.13 split the sensor sysfs attribute structs and the SENSOR_TEMPLATE
+ * macros out of hwmon.h into linux/hwmon-sysfs.h. Kernels before that have
+ * the same declarations in hwmon.h and no hwmon-sysfs.h at all, so including
+ * it unconditionally breaks the build on every 6.12-and-earlier kernel.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
+#define NCT6687_REMOVE_RET int
+#define NCT6687_REMOVE_RETURN return 0;
+#else
+#define NCT6687_REMOVE_RET void
+#define NCT6687_REMOVE_RETURN
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+#include <linux/hwmon-sysfs.h>
+#endif
 
 #ifndef MIN
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
@@ -477,7 +508,7 @@ static int nct6687_fan_config_op_write_handler(const char *val, const struct ker
 	char valcp[16];
 	char *s;
 
-	strncpy(valcp, val, 16);
+	strscpy(valcp, val, 16);
 	valcp[15] = '\0';
 
 	s = strstrip(valcp);
@@ -1415,22 +1446,7 @@ static void nct6687_setup_pwm(struct nct6687_data *data)
 	}
 }
 
-/*
- * platform_driver.remove's signature changed from
- *   int  (*remove)(struct platform_device *)
- * to
- *   void (*remove)(struct platform_device *)
- * in 6.11 (kernel commit 0edb555a6).
- *
- * Conditionally compile the signature so we can drop the
- * -Wincompatible-pointer-types pragma from around the
- * platform_driver struct.
- */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
-static int nct6687_remove(struct platform_device *pdev)
-#else
-static void nct6687_remove(struct platform_device *pdev)
-#endif
+static NCT6687_REMOVE_RET nct6687_remove(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct nct6687_data *data = dev_get_drvdata(dev);
@@ -1445,9 +1461,7 @@ static void nct6687_remove(struct platform_device *pdev)
 
 	mutex_unlock(&data->update_lock);
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
-	return 0;
-#endif
+	NCT6687_REMOVE_RETURN
 }
 
 static int nct6687_probe(struct platform_device *pdev)

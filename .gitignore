@@ -13,7 +13,9 @@ nct6687.mod.c
 nct6687.mod.o
 nct6687.o
 .vscode/
-5.1*/
+# Out-of-tree build output, one directory per kernel version
+# (see the `build` target in the Makefile).
+build/
 
 dkms/
 
