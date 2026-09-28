@@ -88,39 +88,44 @@ jobs:
           # kernel in advance means a pin that 404s the day the image updates.
           sudo apt-get install -y --no-install-recommends bc elfutils-dev || true
 
-      - name: Install build dependencies and kernel headers (Debian)
-        if: matrix.debian
-        shell: bash
-        run: |
-          set -euo pipefail
-          export DEBIAN_FRONTEND=noninteractive
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            bc binutils gcc git kmod make
-          # Debian ships headers per kernel-image package. Pull the newest one
-          # available in the image's archive. Container images lag the archive,
-          # so an exact pin regularly 404s; resolve instead of hardcoding.
-          pkg=$(apt-cache search --names-only '^linux-headers-[0-9].*-amd64$' \
-                | awk '{print $1}' | sort -V | tail -1)
-          echo "installing headers: $pkg"
-          if [ -z "$pkg" ]; then
-            echo "::error::no linux-headers package found for this image"
-            exit 1
-          fi
-          sudo apt-get install -y --no-install-recommends "$pkg"
-
-      - name: Install build dependencies and kernel headers (Fedora)
+      - name: Install build dependencies (Fedora)
         if: matrix.fedora
         shell: bash
         run: |
           set -euo pipefail
-          sudo dnf install -y bc elfutils-libelf-devel gcc git kernel-devel make
-          # kernel-devel pulls the running kernel's headers; for a specific
-          # kernel install the matching version explicitly.
-          sudo dnf install -y "kernel-devel-$(uname -r)" || true
+          sudo dnf install -y bc elfutils-libelf-devel gcc git make
+          # dnf names these kernel-devel-<version>; the apt branch below cannot
+          # run on this image.
+          want="${{ matrix.kver }}"
+          pick=""
+          if [ "$want" != "tip" ] && dnf --quiet list --available "kernel-devel-${want}" >/dev/null 2>&1; then
+            pick="kernel-devel-${want}"
+          else
+            [ "$want" != "tip" ] && \
+              echo "::warning::kernel-devel-${want} is not in this image; using the newest available"
+          fi
+          if [ -z "$pick" ]; then
+            pick=$(dnf --quiet list --available kernel-devel 2>/dev/null \
+                  | awk '/^kernel-devel/ {print $1}' | sort -V | tail -1)
+          fi
+          if [ -z "$pick" ]; then
+            echo "::error::no kernel-devel available in this image"
+            exit 1
+          fi
+          echo "installing: ${pick}"
+          sudo dnf install -y "$pick"
+
+          kver=$(ls -1 /lib/modules 2>/dev/null | sort -V | tail -1)
+          if [ -z "$kver" ] || [ ! -d "/lib/modules/${kver}/build" ]; then
+            echo "::error::${pick} installed but /lib/modules has no build tree"
+            exit 1
+          fi
+          echo "building against: ${kver}"
+          echo "kver=${kver}" >> "$GITHUB_OUTPUT"
 
       - name: Install headers for the kernel under test
         id: kernels
+        if: ${{ !matrix.fedora }}
         shell: bash
         run: |
           set -euo pipefail
@@ -128,28 +133,48 @@ jobs:
           want="${{ matrix.kver }}"
           echo "requested: ${want}"
 
-          # Pick a package: the exact one if the archive has it, otherwise the
-          # newest available. A pinned kernel name goes stale as the image is
-          # rebuilt, and a hard failure on a missing pin is not a driver fault.
-          pick=""
-          if [ "$want" != "tip" ]; then
-            if apt-cache show "linux-headers-${want}" >/dev/null 2>&1; then
+          if [ -n "${FEDORA:-}" ]; then
+            # dnf names these kernel-devel-<version>.
+            pick=""
+            if [ "$want" != "tip" ] && dnf --quiet list --available "kernel-devel-${want}" >/dev/null 2>&1; then
+              pick="kernel-devel-${want}"
+            else
+              [ "$want" != "tip" ] && \
+                echo "::warning::kernel-devel-${want} is not in this image; using the newest available"
+            fi
+            if [ -z "$pick" ]; then
+              pick=$(dnf --quiet list --available kernel-devel 2>/dev/null \
+                    | awk '/^kernel-devel/ {print $1}' | sort -V | tail -1)
+            fi
+            if [ -z "$pick" ]; then
+              echo "::error::no kernel-devel available in this image"
+              exit 1
+            fi
+            echo "installing: ${pick}"
+            sudo dnf install -y "$pick"
+          else
+            # apt names these linux-headers-<version>. Container images lag
+            # their archive, so an exact pin regularly 404s; fall back rather
+            # than fail, and say so, because a missing pin is not a driver fault.
+            pick=""
+            if [ "$want" != "tip" ] && apt-cache show "linux-headers-${want}" >/dev/null 2>&1; then
               pick="linux-headers-${want}"
             else
-              echo "::warning::linux-headers-${want} is not in this image's archive; using the newest available"
+              [ "$want" != "tip" ] && \
+                echo "::warning::linux-headers-${want} is not in this image's archive; using the newest available"
             fi
+            if [ -z "$pick" ]; then
+              pick=$(apt-cache search --names-only '^linux-headers-[0-9]' \
+                    | awk '{print $1}' | sort -V | tail -1)
+            fi
+            if [ -z "$pick" ]; then
+              echo "::error::no linux-headers package available in this image"
+              apt-cache search --names-only linux-headers | head -5 || true
+              exit 1
+            fi
+            echo "installing: ${pick}"
+            sudo apt-get install -y --no-install-recommends "$pick"
           fi
-          if [ -z "$pick" ]; then
-            pick=$(apt-cache search --names-only '^linux-headers-[0-9].*' \
-                   | awk '{print $1}' | sort -V | tail -1)
-          fi
-          if [ -z "$pick" ]; then
-            echo "::error::no linux-headers package available in this image"
-            exit 1
-          fi
-
-          echo "installing: ${pick}"
-          sudo apt-get install -y --no-install-recommends "$pick"
 
           # Trust the directory that appeared, not the name we asked for: the
           # metapackage form installs a differently-versioned directory.
@@ -184,14 +209,17 @@ jobs:
           out=$(make kver="${kver}" build 2>&1) || {
             echo "$out"; exit 1; }
           echo "$out"
-          # The pahole BTF version note is emitted by kbuild tooling, not by
-          # compiling this driver, and it varies with the host's dwarves package.
-          # Everything else is a diagnostic we want to fail on.
-          if echo "$out" | grep -Ei '\bwarning\b|error:' | grep -v 'pahole version differs'; then
-            echo "::error::compiler diagnostics present"
+          # Only diagnostics from compiling nct6687.c. kbuild emits several
+          # notices that are not about this driver's code and that vary with
+          # the host toolchain: the pahole/BTF version mismatch, "the compiler
+          # differs from the one used to build the kernel", and "Skipping BTF
+          # generation" when vmlinux is absent. Treating those as failures
+          # reports a driver fault where the module built and linked cleanly.
+          if echo "$out" | grep -E 'nct6687\.c:[0-9]+.*(warning|error)'; then
+            echo "::error::compiler diagnostics in nct6687.c"
             exit 1
           fi
-          echo "no compiler diagnostics"
+          echo "no compiler diagnostics in nct6687.c"
 
   dkms:
     name: dkms round-trip
