@@ -75,19 +75,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install build dependencies and kernel headers
+      - name: Install build dependencies
         shell: bash
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            bc binutils kmod make gcc linux-headers-common
-          # The exact -<abi> kernel name drifts as a distro ships updates, so
-          # install the headers metapackage and then resolve the real directory
-          # rather than pinning a version that will eventually 404.
-          sudo apt-get install -y --no-install-recommends linux-headers-generic || true
-          sudo apt-get install -y --no-install-recommends "linux-headers-$(uname -r)" || true
+          sudo apt-get install -y --no-install-recommends bc binutils gcc kmod make
+          # No kernel headers here on purpose. The image's own kernel is not the
+          # one under test, so the resolve step below installs the specific
+          # kernel's headers after seeing what the archive offers. Naming a
+          # kernel in advance means a pin that 404s the day the image updates.
+          sudo apt-get install -y --no-install-recommends bc elfutils-dev || true
 
       - name: Install build dependencies and kernel headers (Debian)
         if: matrix.debian
@@ -120,24 +119,43 @@ jobs:
           # kernel install the matching version explicitly.
           sudo dnf install -y "kernel-devel-$(uname -r)" || true
 
-      - name: Resolve available kernel build trees
+      - name: Install headers for the kernel under test
         id: kernels
         shell: bash
         run: |
           set -euo pipefail
-          echo "requested: ${{ matrix.kver }}"
-          # 'tip' means "build against whatever this image provides", which is
-          # how mainline regressions get noticed early.
-          if [ "${{ matrix.kver }}" = "tip" ]; then
-            kver=$(ls -1 /lib/modules 2>/dev/null | sort -V | tail -1)
-          else
-            kver=${{ matrix.kver }}
+          export DEBIAN_FRONTEND=noninteractive
+          want="${{ matrix.kver }}"
+          echo "requested: ${want}"
+
+          # Pick a package: the exact one if the archive has it, otherwise the
+          # newest available. A pinned kernel name goes stale as the image is
+          # rebuilt, and a hard failure on a missing pin is not a driver fault.
+          pick=""
+          if [ "$want" != "tip" ]; then
+            if apt-cache show "linux-headers-${want}" >/dev/null 2>&1; then
+              pick="linux-headers-${want}"
+            else
+              echo "::warning::linux-headers-${want} is not in this image's archive; using the newest available"
+            fi
           fi
-          if [ ! -d "/lib/modules/${kver}/build" ]; then
-            kver=$(ls -1 /lib/modules 2>/dev/null | sort -V | tail -1)
+          if [ -z "$pick" ]; then
+            pick=$(apt-cache search --names-only '^linux-headers-[0-9].*' \
+                   | awk '{print $1}' | sort -V | tail -1)
           fi
-          if [ -z "${kver}" ] || [ ! -d "/lib/modules/${kver}/build" ]; then
-            echo "::error::no kernel build tree found; cannot build"
+          if [ -z "$pick" ]; then
+            echo "::error::no linux-headers package available in this image"
+            exit 1
+          fi
+
+          echo "installing: ${pick}"
+          sudo apt-get install -y --no-install-recommends "$pick"
+
+          # Trust the directory that appeared, not the name we asked for: the
+          # metapackage form installs a differently-versioned directory.
+          kver=$(ls -1 /lib/modules 2>/dev/null | sort -V | tail -1)
+          if [ -z "$kver" ] || [ ! -d "/lib/modules/${kver}/build" ]; then
+            echo "::error::${pick} installed but /lib/modules has no build tree"
             ls -la /lib/modules || true
             exit 1
           fi
@@ -148,9 +166,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          make kver="${{ steps.kernels.outputs.kver }}" build
-          ls -l build/"${{ steps.kernels.outputs.kver }}"/nct6687.ko
-          modinfo build/"${{ steps.kernels.outputs.kver }}"/nct6687.ko | head -5
+          kver="${{ steps.kernels.outputs.kver }}"
+          echo "requested matrix kernel: ${{ matrix.kver }}"
+          echo "resolved kernel: ${kver}"
+          make kver="${kver}" build
+          ls -l "build/${kver}/nct6687.ko"
+          modinfo "build/${kver}/nct6687.ko" | head -5
 
       - name: Check for warnings
         shell: bash
@@ -158,8 +179,9 @@ jobs:
           set -euo pipefail
           # Rebuild verbosely and fail on any compiler diagnostic. A driver that
           # only builds clean by accident is not buildable on the next kernel.
-          make kver="${{ steps.kernels.outputs.kver }}" clean
-          out=$(make kver="${{ steps.kernels.outputs.kver }}" build 2>&1) || {
+          kver="${{ steps.kernels.outputs.kver }}"
+          make kver="${kver}" clean
+          out=$(make kver="${kver}" build 2>&1) || {
             echo "$out"; exit 1; }
           echo "$out"
           # The pahole BTF version note is emitted by kbuild tooling, not by
