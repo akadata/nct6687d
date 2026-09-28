@@ -76,19 +76,18 @@ jobs:
           fetch-depth: 0
 
       - name: Install build dependencies and kernel headers
-        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update -qq
-          apt-get install -y --no-install-recommends \
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
             bc binutils kmod make gcc linux-headers-common
           # The exact -<abi> kernel name drifts as a distro ships updates, so
           # install the headers metapackage and then resolve the real directory
           # rather than pinning a version that will eventually 404.
-          apt-get install -y --no-install-recommends linux-headers-generic || true
-          apt-get install -y --no-install-recommends "linux-headers-$(uname -r)" || true
+          sudo apt-get install -y --no-install-recommends linux-headers-generic || true
+          sudo apt-get install -y --no-install-recommends "linux-headers-$(uname -r)" || true
 
       - name: Install build dependencies and kernel headers (Debian)
         if: matrix.debian
@@ -96,25 +95,30 @@ jobs:
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update -qq
-          apt-get install -y --no-install-recommends \
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
             bc binutils gcc git kmod make
           # Debian ships headers per kernel-image package. Pull the newest one
-          # available in the image's archive.
+          # available in the image's archive. Container images lag the archive,
+          # so an exact pin regularly 404s; resolve instead of hardcoding.
           pkg=$(apt-cache search --names-only '^linux-headers-[0-9].*-amd64$' \
                 | awk '{print $1}' | sort -V | tail -1)
           echo "installing headers: $pkg"
-          apt-get install -y --no-install-recommends "$pkg"
+          if [ -z "$pkg" ]; then
+            echo "::error::no linux-headers package found for this image"
+            exit 1
+          fi
+          sudo apt-get install -y --no-install-recommends "$pkg"
 
       - name: Install build dependencies and kernel headers (Fedora)
         if: matrix.fedora
         shell: bash
         run: |
           set -euo pipefail
-          dnf install -y bc elfutils-libelf-devel gcc git kernel-devel make
+          sudo dnf install -y bc elfutils-libelf-devel gcc git kernel-devel make
           # kernel-devel pulls the running kernel's headers; for a specific
           # kernel install the matching version explicitly.
-          dnf install -y "kernel-devel-$(uname -r)" || true
+          sudo dnf install -y "kernel-devel-$(uname -r)" || true
 
       - name: Resolve available kernel build trees
         id: kernels
@@ -184,10 +188,10 @@ jobs:
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update -qq
-          apt-get install -y --no-install-recommends \
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
             bc binutils dkms gcc git kmod make
-          apt-get install -y --no-install-recommends "linux-headers-$(uname -r)"
+          sudo apt-get install -y --no-install-recommends "linux-headers-$(uname -r)"
 
       - name: Stage the sources the way dkms.conf expects
         shell: bash
