@@ -20,7 +20,7 @@ endif
 
 # Fail early and legibly rather than letting kbuild emit a wall of missing-file
 # errors when the headers for the target kernel are not installed.
-.PHONY: check-kdir
+.PHONY: check check-kdir
 check-kdir:
 	@if [ ! -d "${kdir}" ]; then \
 		echo "error: no kernel build tree at ${kdir}"; \
@@ -110,6 +110,12 @@ akmod: akmod/install
 # find the module. The kernel tree, compiler selection and the module itself are
 # shared with the `build` target above, so the two paths cannot drift apart in
 # the ways that actually break a rebuild.
+# Smoke tests: builds the module, checks the load-time contract statically, and
+# if run as root on a machine with the chip, exercises a PWM write and readback
+# and restores it afterwards. See tests/smoke.sh for what is and is not asserted.
+check:
+	./tests/smoke.sh $(kver)
+
 dkms/build: check-kdir
 	$(MAKE) -C ${kdir} M=${curpwd} $(LLVM_FLAGS) modules
 

@@ -66,37 +66,84 @@ The implementation is minimalist and was done by reverse coding of Windows 10 so
 ```
 <br>
 
+## What this driver exposes
+
+Every channel is registered in sysfs unconditionally, with a fixed label:
+
+| Group | Count | Files |
+|---|---|---|
+| Temperature | 7 | `temp1_input` .. `temp7_input` |
+| Voltage | 14 | `in0_input` .. `in13_input` |
+| Fan | 8 | `fan1_input` .. `fan8_input` |
+| PWM | 8 | `pwm1` .. `pwm8`, `pwmN_enable` |
+
+This is the same for every chip the driver handles, including the Nct6686d,
+which is detected and gets an hwmon device but no additional channels. There is
+no current, power or energy support.
+
+`tempN_min` and `tempN_max` are the lowest and highest values seen since the
+module loaded. They are not hardware limits and are not writable.
+
+### A board that does not populate every channel
+
+Because exposure is unconditional, a channel the board does not wire up still
+appears, with a plausible label and a value that is a consequence of nothing
+being connected: an unwired voltage input reads 0 mV, an unwired fan header
+reads 0 RPM, an unused temperature register reads 0.
+
+The per-channel configuration registers were expected to be the hardware's own
+record of which channels exist, so that exposure could follow the hardware
+instead of a per-board file. Measured on an MSI X870E Tomahawk they do not
+support that: channels reading correctly share `MON_CFG == 0x00` with the ones
+that are dead, so hiding on a cleared bit would remove working sensors. They
+are read and logged under `pr_debug` for anyone with the datasheet to build on,
+and nothing is hidden on the strength of them. The full evidence is in
+`TESTING_RESULTS.md`.
+
+Until then the per-board workaround is an `sensors.d` config with an `ignore`
+line per phantom channel, as in `sensors.d/`. This driver deliberately does not
+decide on its own that a reading is implausible, because that judgement belongs
+in userspace where it is reversible and cannot cost a genuinely overheating
+sensor its reading.
+
 ## Sensors
 
-By running the command sensors, you got this output
+Real output from `sensors` on an MSI X870E Tomahawk. The channels reading 0
+(`CPU 1P8`, `CPU VDDP`) and the 0 RPM headers are not populated on that board;
+see the section above. `PCIe x1` reads -63.0 °C, which is a two's complement
+register byte being reported correctly rather than a real temperature.
 
 ```
 nct6687-isa-0a20
 Adapter: ISA adapter
-+12V:           12.17 V  (min = +12.17 V, max = +12.19 V)
-+5V:             5.14 V  (min =  +5.14 V, max =  +5.14 V)
-+3.3V:           3.38 V  (min =  +3.38 V, max =  +3.38 V)
-CPU Soc:         1.11 V  (min =  +1.11 V, max =  +1.11 V)
-CPU Vcore:       1.05 V  (min =  +0.97 V, max =  +1.05 V)
-CPU 1P8:         1.84 V  (min =  +1.84 V, max =  +1.84 V)
++12V:           12.07 V  (min = +12.02 V, max = +12.07 V)
++5V:             5.02 V  (min =  +5.01 V, max =  +5.02 V)
++3.3V:           3.36 V  (min =  +3.36 V, max =  +3.36 V)
+CPU Soc:         1.40 V  (min =  +1.40 V, max =  +1.45 V)
+CPU Vcore:     560.00 mV (min =  +0.56 V, max =  +0.56 V)
+CPU 1P8:         0.00 V  (min =  +0.00 V, max =  +0.00 V)
 CPU VDDP:        0.00 V  (min =  +0.00 V, max =  +0.00 V)
-DRAM:            1.34 V  (min =  +1.34 V, max =  +1.35 V)
-Chipset:       890.00 mV (min =  +0.89 V, max =  +0.89 V)
-CPU Fan:       1192 RPM  (min = 1192 RPM, max = 1202 RPM)
-Pump Fan:      1538 RPM  (min = 1526 RPM, max = 1538 RPM)
-System Fan #1:  922 RPM  (min =  920 RPM, max =  922 RPM)
-System Fan #2:  953 RPM  (min =  953 RPM, max =  953 RPM)
-System Fan #3: 1393 RPM  (min = 1393 RPM, max = 1393 RPM)
+DRAM:            3.41 V  (min =  +3.40 V, max =  +3.41 V)
+Chipset:       294.00 mV (min =  +0.28 V, max =  +0.30 V)
+CPU SA:        898.00 mV (min =  +0.90 V, max =  +0.90 V)
+Voltage #2:      1.52 V  (min =  +1.52 V, max =  +1.53 V)
+AVCC3:           3.26 V  (min =  +3.25 V, max =  +3.26 V)
+AVSB:            3.36 V  (min =  +3.36 V, max =  +3.36 V)
+VBat:            1.06 V  (min =  +1.06 V, max =  +1.06 V)
+CPU Fan:       3000 RPM  (min = 2941 RPM, max = 3370 RPM)
+Pump Fan:         0 RPM  (min =    0 RPM, max =    0 RPM)
+System Fan #1:    0 RPM  (min =    0 RPM, max =    0 RPM)
+System Fan #2:    0 RPM  (min =    0 RPM, max =    0 RPM)
+System Fan #3:  980 RPM  (min =  980 RPM, max = 1150 RPM)
 System Fan #4:    0 RPM  (min =    0 RPM, max =    0 RPM)
-System Fan #5: 1007 RPM  (min = 1007 RPM, max = 1007 RPM)
+System Fan #5:  995 RPM  (min =  995 RPM, max = 1201 RPM)
 System Fan #6:    0 RPM  (min =    0 RPM, max =    0 RPM)
-CPU:            +59.0°C  (low  = +52.0°C, high = +59.0°C)
-System:         +34.0°C  (low  = +34.0°C, high = +34.0°C)
-VRM MOS:        +31.0°C  (low  = +31.0°C, high = +31.0°C)
-PCH:            +40.0°C  (low  = +40.0°C, high = +40.0°C)
-CPU Socket:     +33.0°C  (low  = +33.0°C, high = +33.0°C)
-PCIe x1:        +32.0°C  (low  = +32.0°C, high = +32.0°C)
-M2_1:            +0.0°C  (low  =  +0.0°C, high =  +0.0°C)
+CPU:            +47.5°C  (low  = +47.5°C, high = +62.0°C)
+System:         +48.5°C  (low  = +48.0°C, high = +49.0°C)
+VRM MOS:        +44.5°C  (low  = +44.0°C, high = +44.5°C)
+PCH:            +61.0°C  (low  = +60.0°C, high = +61.0°C)
+CPU Socket:     +40.0°C  (low  = +40.0°C, high = +41.0°C)
+PCIe x1:        -63.0°C  (low  = -63.0°C, high = -63.0°C)
 ```
 
 <br>
@@ -123,6 +170,24 @@ Just add nct6687 into /etc/modules
 ![Fan](./images/fan.png) ![Voltage](./images/voltage.png)
 
 <br>
+
+## Testing
+
+```shell
+make check
+```
+
+Builds the module and runs the smoke tests. The build and static checks run
+anywhere; the hardware checks need root and a machine with the chip, and are
+skipped rather than failed without one.
+
+Kernel API compatibility is covered by CI, which builds against 5.15, 6.5, 6.8,
+6.11, 6.12, 6.14, 6.17 and mainline, with both sides of the two version
+boundaries the driver carries (6.11 for `platform_driver.remove`, 6.13 for the
+`hwmon-sysfs.h` split). A dkms install and remove round-trip is included.
+
+See `TESTING_RESULTS.md` for what has been measured on hardware, what has not,
+and the approaches that were tried and rejected.
 
 ## Tested
 
