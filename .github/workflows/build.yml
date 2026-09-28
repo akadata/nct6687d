@@ -84,15 +84,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # A job container runs as a non-root user, so git refuses to touch the
-      # checkout and kbuild cannot write into the root-owned kernel tree.
-      - name: Make the workspace writable
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config --global --add safe.directory "$(pwd)"
-          id -u
-
       # One step for every image, using whichever package manager is actually
       # present. Gating on a matrix key with if: is unreliable here: a step so
       # gated can run outside the job's container, which is how a Fedora entry
@@ -160,9 +151,14 @@ jobs:
           fi
           echo "building against: ${kver}"
           echo "kver=${kver}" >> "$GITHUB_OUTPUT"
-          # The header install ran under sudo, so the build tree is root-owned.
-          # Hand the workspace to the same user that will run kbuild.
-          sudo chown -R "$(id -u):$(id -g)" /lib/modules/"${kver}" 2>/dev/null || true
+
+          # Two things a hosted runner has and a job container does not.
+          # git is absent until this step installs it, and refuses the checkout
+          # as "dubious ownership" until safe.directory is set. The header
+          # install ran under sudo, so the kernel tree is root-owned while
+          # kbuild runs unprivileged.
+          git config --global --add safe.directory "$(pwd)"
+          sudo chown -R "$(id -u):$(id -g)" "/lib/modules/${kver}" 2>/dev/null || true
 
       - name: Build
         shell: bash
