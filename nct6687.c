@@ -260,11 +260,15 @@ static inline void superio_exit(int ioreg)
 #define NCT6687_HWM_CFG 0x180
 
 /*
- * Per-channel enable registers, one bit per channel. These are the hardware's
- * own answer to which channels the board actually populates, and are what the
- * hide_unused module parameter uses. Their bit layout is not documented by
- * Nuvoton; see the hide_unused comment for how the mask is interpreted and
- * what is deliberately not inferred from it.
+ * Per-channel configuration registers.
+ *
+ * These were hoped to be the hardware's own record of which channels a board
+ * populates, which would let sysfs exposure follow the hardware instead of
+ * exposing every channel unconditionally. Measured on an MSI X870E Tomahawk
+ * with an Nct6687D they do not support that inference; see
+ * nct6687_log_channel_config() for the evidence. They are read and logged so
+ * that anyone on a different board can add to it, and no channel is hidden on
+ * the strength of them.
  */
 #define NCT6687_REG_MON_CFG(x) (0x1a0 + (x))
 #define NCT6687_REG_FANIN_CFG(x) (0xA00 + (x))
@@ -1410,6 +1414,68 @@ static const struct sensor_template_group nct6687_pwm_template_group = {
 };
 
 /* Get the monitoring functions started */
+/*
+ * Log the per-channel configuration registers.
+ *
+ * This exists as evidence rather than as a filter. The idea was that a board
+ * which does not populate a channel would leave it disabled in these registers,
+ * and that sysfs exposure could then follow the hardware instead of exposing
+ * all 37 channels unconditionally with a plausible label attached to each.
+ *
+ * That does not hold on the board measured. Raw values, MSI X870E Tomahawk,
+ * Nct6687D, EC firmware 0.0:
+ *
+ *	MON_CFG(0..13) = 20 02 09 31 0a 50 00 00 00 00 00 00 00 00
+ *	FANIN_CFG(0..7) = 00 x8
+ *	FANOUT_CFG(0..7) = a0 a2 aa ac ae b0 b2 a4
+ *
+ * The two voltage channels that are genuinely unpopulated on that board read
+ * 0 mV, as expected, and their MON_CFG bytes are 0x00. But so are the bytes for
+ * the channels that are populated and reading correctly: +3.3V at 3356 mV,
+ * CPU SA at 898 mV, Voltage #2 at 1522 mV, AVCC3 at 3240 mV, AVSB at 3356 mV
+ * and VBat at 1060 mV all have MON_CFG == 0x00. A cleared bit therefore does
+ * not mean an unpopulated channel, and hiding on it would remove six working
+ * voltage sensors while keeping the two dead ones.
+ *
+ * FANIN_CFG is 0x00 for all eight inputs while three fans spin, so it carries
+ * no presence information at all. FANOUT_CFG holds values that look like a PWM
+ * or scaling table rather than an enable map, and this driver's own comment
+ * records that these offsets read as zero on boards where they do not apply.
+ *
+ * There is also no established correspondence between the register index used
+ * by NCT6687_REG_VOLTAGE() and the index of the MON_CFG byte that would govern
+ * it: the voltage table's .reg field is an independent permutation, and nothing
+ * in the chip documentation ties the two together.
+ *
+ * So the registers are logged and nothing is inferred from them. A board
+ * maintainer with the datasheet can add a mapping here; anyone without one
+ * cannot get a correct answer out of these values, and the failure mode of
+ * guessing would be hiding a live sensor.
+ *
+ * Not a plausible-value filter either, and deliberately so: rejecting a reading
+ * because it looks wrong is presentation policy and belongs in userspace,
+ * where it is reversible and cannot cost a genuinely overheating sensor its
+ * reading.
+ */
+static void nct6687_log_channel_config(struct nct6687_data *data)
+{
+	int i;
+
+	for (i = 0; i < NCT6687_NUM_REG_VOLTAGE; i++)
+		pr_debug("MON_CFG(%d) addr=0x%04x val=0x%02x\n", i,
+			 NCT6687_REG_MON_CFG(i),
+			 nct6687_read(data, NCT6687_REG_MON_CFG(i)));
+
+	for (i = 0; i < NCT6687_NUM_REG_FAN; i++) {
+		pr_debug("FANIN_CFG(%d) addr=0x%04x val=0x%02x\n", i,
+			 NCT6687_REG_FANIN_CFG(i),
+			 nct6687_read(data, NCT6687_REG_FANIN_CFG(i)));
+		pr_debug("FANOUT_CFG(%d) addr=0x%04x val=0x%02x\n", i,
+			 NCT6687_REG_FANOUT_CFG(i),
+			 nct6687_read(data, NCT6687_REG_FANOUT_CFG(i)));
+	}
+}
+
 static inline void nct6687_init_device(struct nct6687_data *data)
 {
 	u8 tmp;
@@ -1433,6 +1499,8 @@ static inline void nct6687_init_device(struct nct6687_data *data)
 		pr_debug("nct6687_init_device: enabling hardware monitoring\n");
 		nct6687_write(data, NCT6687_HWM_CFG, tmp | 0x80);
 	}
+
+	nct6687_log_channel_config(data);
 
 	// enable SIO voltage
 	nct6687_write(data, 0x1BB, 0x61);
