@@ -854,7 +854,16 @@ static void nct6687_update_temperatures(struct nct6687_data *data)
 
 	for (i = 0; i < NCT6687_NUM_REG_TEMP; i++)
 	{
-		s32 value = (char)nct6687_read(data, NCT6687_REG_TEMP(i));
+		/*
+		 * The cast to s8 is explicit rather than to char on purpose.
+		 * kbuild compiles modules with -funsigned-char, so plain char is
+		 * unsigned and (char) is a no-op: a register byte of 0xC1 would
+		 * read back as 193 and be reported as 193.0 C, when the sensor
+		 * format is two's complement and it means -63.0 C. Spelled s8,
+		 * the value is signed regardless of the compiler's char
+		 * signedness.
+		 */
+		s8 value = (s8)nct6687_read(data, NCT6687_REG_TEMP(i));
 		s32 half = (nct6687_read(data, NCT6687_REG_TEMP(i) + 1) >> 7) & 0x1;
 		s32 temperature = (value * 1000) + (500 * half);
 
@@ -1418,6 +1427,7 @@ static inline void nct6687_init_device(struct nct6687_data *data)
 	 */
 	tmp = nct6687_read(data, NCT6687_HWM_CFG);
 	pr_debug("nct6687_init_device: NCT6687_HWM_CFG = 0x%02x\n", tmp);
+
 	if (!(tmp & 0x80))
 	{
 		pr_debug("nct6687_init_device: enabling hardware monitoring\n");
@@ -1483,7 +1493,16 @@ static void nct6687_setup_temperatures(struct nct6687_data *data)
 
 	for (i = 0; i < NCT6687_NUM_REG_TEMP; i++)
 	{
-		s32 value = (char)nct6687_read(data, NCT6687_REG_TEMP(i));
+		/*
+		 * The cast to s8 is explicit rather than to char on purpose.
+		 * kbuild compiles modules with -funsigned-char, so plain char is
+		 * unsigned and (char) is a no-op: a register byte of 0xC1 would
+		 * read back as 193 and be reported as 193.0 C, when the sensor
+		 * format is two's complement and it means -63.0 C. Spelled s8,
+		 * the value is signed regardless of the compiler's char
+		 * signedness.
+		 */
+		s8 value = (s8)nct6687_read(data, NCT6687_REG_TEMP(i));
 		s32 half = (nct6687_read(data, NCT6687_REG_TEMP(i) + 1) >> 7) & 0x1;
 		s32 temperature = (value * 1000) + (500 * half);
 
