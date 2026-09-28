@@ -1084,8 +1084,22 @@ static ssize_t show_pwm(struct device *dev, struct device_attribute *attr, char 
 	return sprintf(buf, "%d\n", data->pwm[index]);
 }
 
-/* Returns true on success and false on timeout. */
-static bool start_fan_cfg_update(struct nct6687_data *data, int fan)
+/*
+ * Ask the EC to unlock its fan configuration registers.
+ *
+ * Returns 0 when the register set is unlocked and a subsequent write to
+ * NCT6687_REG_PWM_WRITE() will be applied. On failure the caller must not
+ * write, and must report the failure rather than claiming success: the EC
+ * applies PWM changes only while unlocked, so a write attempted after a
+ * failed request here is silently discarded and the fan keeps running at
+ * whatever it was doing before.
+ *
+ * These timeouts are the only place this driver gets real evidence that the
+ * EC is not responding. inb_p() has no error return and no status bit, so a
+ * read cannot be distinguished from a stuck bus, and no sentinel value is
+ * invented here to fake one.
+ */
+static int start_fan_cfg_update(struct nct6687_data *data, int fan)
 {
 	int i;
 	u8 engsts;
@@ -1093,8 +1107,8 @@ static bool start_fan_cfg_update(struct nct6687_data *data, int fan)
 	engsts = nct6687_read(data, NCT6687_REG_FAN_ENGINE_STS);
 	if (!(engsts & NCT6687_FAN_CFG_LOCK) && (engsts & NCT6687_FAN_CFG_PHASE))
 	{
-		pr_warn("Fan registers are already accessible\n");
-		return true;
+		pr_debug("Fan registers already accessible, skipping unlock request\n");
+		return 0;
 	}
 
 	/* Wait up to a second until config phase is done and config request is clear. */
@@ -1109,7 +1123,7 @@ static bool start_fan_cfg_update(struct nct6687_data *data, int fan)
 	if (i == 1000)
 	{
 		pr_err("EC is stuck in configuration phase for too long\n");
-		return false;
+		return -ETIMEDOUT;
 	}
 
 	nct6687_write(data, NCT6687_REG_FAN_PWM_COMMAND(fan), NCT6687_FAN_CFG_REQ);
@@ -1126,13 +1140,22 @@ static bool start_fan_cfg_update(struct nct6687_data *data, int fan)
 	if (i == 1000)
 	{
 		pr_err("Failed to gain access to fan configuration registers\n");
-		return false;
+		return -ETIMEDOUT;
 	}
 
-	return true;
+	return 0;
 }
 
-static void finish_fan_cfg_update(struct nct6687_data *data, int fan)
+/*
+ * Ask the EC to re-lock its fan configuration registers and check whether it
+ * accepted the new configuration.
+ *
+ * The EC sets NCT6687_FAN_CFG_INVALID when it rejects what was written, and
+ * clears NCT6687_FAN_CFG_LOCK when it has finished. Both are the EC telling us
+ * something went wrong, so both are reported to the caller rather than only
+ * logged.
+ */
+static int finish_fan_cfg_update(struct nct6687_data *data, int fan)
 {
 	int i;
 	u8 engsts;
@@ -1141,8 +1164,8 @@ static void finish_fan_cfg_update(struct nct6687_data *data, int fan)
 	engsts = nct6687_read(data, NCT6687_REG_FAN_ENGINE_STS);
 	if ((engsts & NCT6687_FAN_CFG_LOCK) || !(engsts & NCT6687_FAN_CFG_PHASE))
 	{
-		pr_warn("Fan registers are already not accessible\n");
-		return;
+		pr_err("Fan registers are already not accessible\n");
+		return -EIO;
 	}
 
 	/*
@@ -1165,13 +1188,24 @@ static void finish_fan_cfg_update(struct nct6687_data *data, int fan)
 	}
 
 	if (i == 1000)
+	{
 		pr_err("Failed waiting for new configuration to be accepted\n");
+		return -ETIMEDOUT;
+	}
 
 	if (engsts & NCT6687_FAN_CFG_INVALID)
-		pr_warn("The device rejected new configuration as invalid\n");
+	{
+		pr_err("The device rejected new configuration as invalid\n");
+		return -EIO;
+	}
 
 	if (!(engsts & NCT6687_FAN_CFG_LOCK))
-		pr_warn("Fan registers are still accessible\n");
+	{
+		pr_err("Fan registers are still accessible\n");
+		return -EIO;
+	}
+
+	return 0;
 }
 
 static ssize_t store_pwm(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
@@ -1182,6 +1216,7 @@ static ssize_t store_pwm(struct device *dev, struct device_attribute *attr, cons
 	unsigned long val;
 	u16 mode;
 	u8 bitMask;
+	int ret;
 
 	if (kstrtoul(buf, 10, &val) || val > 255 || index >= NCT6687_NUM_REG_FAN)
 		return -EINVAL;
@@ -1196,30 +1231,41 @@ static ssize_t store_pwm(struct device *dev, struct device_attribute *attr, cons
 	mode = (u8)(mode | bitMask);
 	nct6687_write(data, NCT6687_REG_FAN_CTRL_MODE(index), mode);
 
-	if (start_fan_cfg_update(data, index))
+	ret = start_fan_cfg_update(data, index);
+	if (ret)
+		goto out_unlock;
+
+	if (index >= NCT6687_FIRST_SYSTEM_FAN_INDEX && nct6687_fan_config_type == FAN_CONFIG_MSI_ALT1 && msi_fan_brute_force)
 	{
-		if (index >= NCT6687_FIRST_SYSTEM_FAN_INDEX && nct6687_fan_config_type == FAN_CONFIG_MSI_ALT1 && msi_fan_brute_force)
+		// For MSI alt boards: Check if current PWM already matches target to avoid unnecessary writes
+		u8 current_pwm = nct6687_read(data, NCT6687_REG_PWM(index));
+		if (current_pwm != val)
 		{
-			// For MSI alt boards: Check if current PWM already matches target to avoid unnecessary writes
-			u8 current_pwm = nct6687_read(data, NCT6687_REG_PWM(index));
-			if (current_pwm != val)
-			{
-				nct6687_write_all_curve(data, NCT6687_REG_PWM_WRITE(index), val);
-			}
+			nct6687_write_all_curve(data, NCT6687_REG_PWM_WRITE(index), val);
 		}
-		else
-		{
-			nct6687_write(data, NCT6687_REG_PWM_WRITE(index), val);
-		}
-		finish_fan_cfg_update(data, index);
 	}
+	else
+	{
+		nct6687_write(data, NCT6687_REG_PWM_WRITE(index), val);
+	}
+
+	ret = finish_fan_cfg_update(data, index);
+	if (ret)
+		goto out_unlock;
 
 	data->pwm[index] = nct6687_read(data, NCT6687_REG_PWM(index));
 	data->pwm_enable[index] = nct6687_get_pwm_enable(data, index);
 
+out_unlock:
 	mutex_unlock(&data->update_lock);
 
-	return count;
+	/*
+	 * Report the failure to userspace. Returning count after a write the EC
+	 * never applied would tell the caller the fan is now running at the
+	 * requested duty when it is not, which for a cooling fan control is the
+	 * one outcome worth refusing to hide.
+	 */
+	return ret ? ret : count;
 }
 
 static ssize_t show_pwm_enable(struct device *dev, struct device_attribute *attr, char *buf)
@@ -1304,7 +1350,7 @@ static void nct6687_restore_fan_control(struct nct6687_data *data, int index)
 
 		nct6687_write(data, NCT6687_REG_FAN_CTRL_MODE(index), mode);
 
-		if (start_fan_cfg_update(data, index))
+		if (!start_fan_cfg_update(data, index))
 		{
 			// Use same write method as store_pwm: brute force for MSI alt boards, normal write otherwise
 			if (index >= NCT6687_FIRST_SYSTEM_FAN_INDEX && nct6687_fan_config_type == FAN_CONFIG_MSI_ALT1 && msi_fan_brute_force)
