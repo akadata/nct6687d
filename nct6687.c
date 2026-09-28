@@ -44,6 +44,7 @@
 #include <linux/io.h>
 #include <linux/jiffies.h>
 #include <linux/hwmon.h>
+#include <linux/hwmon-sysfs.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
@@ -66,11 +67,6 @@
  * Defining the return type as a macro lets the body be written once, and
  * avoids needing a -Wincompatible-pointer-types pragma around the
  * platform_driver struct on old kernels.
- *
- * v6.13 split the sensor sysfs attribute structs and the SENSOR_TEMPLATE
- * macros out of hwmon.h into linux/hwmon-sysfs.h. Kernels before that have
- * the same declarations in hwmon.h and no hwmon-sysfs.h at all, so including
- * it unconditionally breaks the build on every 6.12-and-earlier kernel.
  */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
 #define NCT6687_REMOVE_RET int
@@ -78,10 +74,6 @@
 #else
 #define NCT6687_REMOVE_RET void
 #define NCT6687_REMOVE_RETURN
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
-#include <linux/hwmon-sysfs.h>
 #endif
 
 #ifndef MIN

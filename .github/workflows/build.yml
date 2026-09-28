@@ -2,13 +2,11 @@
 name: build
 
 # Build the driver against a spread of kernel versions so that a kernel API
-# change breaks CI instead of reaching a user at `modprobe` time. The two
-# version boundaries the driver actually cares about are:
+# change breaks CI instead of reaching a user at `modprobe` time.
 #
-#   6.11  platform_driver.remove changed from int to void
-#   6.13  sensor sysfs structs moved from hwmon.h to linux/hwmon-sysfs.h
-#
-# Both sides of each boundary are covered below.
+# The one version boundary the driver carries is 6.11, where
+# platform_driver.remove changed from returning int to returning void. Both
+# sides of it are covered below.
 on:
   push:
     branches: [main]
@@ -46,8 +44,8 @@ jobs:
           # has no headers for it, the newest available is used and the job says
           # so, because a stale pin is not a kernel incompatibility.
           #
-          # Both sides of both version boundaries the driver carries are
-          # covered: 6.11 for platform_driver.remove, 6.13 for hwmon-sysfs.h.
+          # Both sides of the one version boundary the driver carries, 6.11
+          # for platform_driver.remove.
           - name: 5.15 (Ubuntu 22.04 LTS)
             image: ubuntu:22.04
             kver: 5.15.0-139-generic
@@ -58,8 +56,7 @@ jobs:
             image: ubuntu:24.04
             kver: 6.8.0-60-generic
 
-          # 6.11 <= x < 6.13: remove() returns void, hwmon-sysfs.h is not
-          # included. The narrow window where both gates disagree.
+          # >= 6.11: remove() returns void.
           - name: 6.11 (Ubuntu 24.10)
             image: ubuntu:24.10
             kver: 6.11.0-28-generic
@@ -67,7 +64,6 @@ jobs:
             image: debian:trixie
             kver: 6.12.38+deb13-amd64
 
-          # >= 6.13: both gates flip, hwmon-sysfs.h is required.
           - name: 6.14 (Debian 13)
             image: debian:trixie
             kver: 6.14.0-1-amd64

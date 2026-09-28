@@ -92,6 +92,22 @@ else
 fi
 
 echo "== static checks =="
+# The driver carries exactly one version conditional. If a second appears it
+# needs a header-checked justification, because the obvious candidate --
+# <linux/hwmon-sysfs.h> -- has existed since well before 4.19 and is not a
+# boundary at all. Gating it on 6.13 broke the build on 5.15 and 6.12 while
+# looking like it was protecting them.
+gates=$(grep -c 'KERNEL_VERSION' nct6687.c)
+if [ "$gates" -le 2 ]; then
+	ok "one version boundary gated (KERNEL_VERSION uses: ${gates})"
+else
+	no "${gates} KERNEL_VERSION uses; expected only the 6.11 remove() gate"
+fi
+if grep -q 'include <linux/hwmon-sysfs.h>' nct6687.c; then
+	ok "hwmon-sysfs.h included unconditionally"
+else
+	no "hwmon-sysfs.h include missing or version-gated"
+fi
 # The temperature cast must be s8, not char: kbuild uses -funsigned-char, so a
 # cast to char is a no-op and a two's complement register byte comes out as a
 # large positive temperature.

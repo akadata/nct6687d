@@ -4,6 +4,36 @@ What has actually been verified, and on what. The point of this file is to be
 specific enough that a reader can tell which claims are measured and which are
 assumptions from a datasheet nobody in the project has.
 
+## The version-boundary claim, corrected
+
+This file originally recorded two version boundaries: 6.11 for
+`platform_driver.remove`, and 6.13 for a `linux/hwmon-sysfs.h` split. The second
+was wrong, and CI proved it.
+
+The 6.13 gate was added on the belief that the sensor sysfs structs and the
+`SENSOR_TEMPLATE` macros moved out of `hwmon.h` into a new
+`linux/hwmon-sysfs.h` at 6.13. Checked against upstream tags, that header has
+existed since at least v4.19 and defines `struct sensor_device_attribute_2` in
+v4.19, v5.15, v6.0, v6.1 through v6.12, and later. v6.12's `hwmon.h` contains
+no such struct and no `SENSOR_TEMPLATE` at all.
+
+So the include was correct unconditionally all along, and the gate broke the
+build on precisely the kernels it was meant to protect. The 5.15 and 6.12 jobs
+failed with "field 'a2' has incomplete type" and "invalid use of undefined type
+'struct sensor_device_attribute_2'" on the first CI run that actually built
+against those kernels.
+
+Reverted. The driver has one version conditional, for 6.11, and the matrix
+covers both sides of it. `tests/smoke.sh` now asserts that only one
+`KERNEL_VERSION` gate exists and that the `hwmon-sysfs.h` include is
+unconditional, so the invented boundary cannot quietly come back.
+
+Worth recording how this survived review: the gate was added, and the commit
+message for it confidently described the 6.13 split as fact. It was verified
+locally only in the sense that the file compiled on the one kernel installed,
+and a preprocessor check against a hand-made 6.12 header tree was never
+completed. CI across real kernel versions is what caught it.
+
 ## Automated checks
 
 `make check` builds the module and runs `tests/smoke.sh`. The build and static
@@ -12,7 +42,7 @@ chip, and is skipped rather than failed without one, so this is usable on a
 build machine as a plain build test.
 
 ```
-15 passed, 0 failed, 0 skipped
+17 passed, 0 failed, 0 skipped
 ```
 
 Covered:
@@ -20,6 +50,8 @@ Covered:
 - the module compiles for the running kernel with no compiler diagnostics
 - the built module's vermagic matches the running kernel
 - the temperature read is cast to `s8` and no ineffective `(char)` cast remains
+- exactly one `KERNEL_VERSION` gate exists, and `hwmon-sysfs.h` is included
+  unconditionally
 - `store_pwm` propagates a failed unlock handshake rather than reporting success
 - all 7 temperature, 14 voltage, 8 fan and 8 pwm channels are present
 - a PWM write is accepted, read back, and the original value is restored
@@ -113,7 +145,7 @@ Fan RPM responded to the change, and the original duty was restored afterwards.
 - **No other board.** Everything above is one MSI X870E. The DMI board list
   covers several MSI models; the `msi_alt` fan register mapping is exercised
   only if the DMI match fires.
-- **No other kernel.** Builds are verified in CI against 5.15 through 6.17 and
+- **No other kernel at runtime.** CI builds against 5.15 through 6.17 and
   mainline. Runtime behaviour is verified only on 7.2.2.
 - **The `start_fan_cfg_update` timeout path** propagates `-ETIMEDOUT` now, but
   has not been observed to fire. Triggering it requires an EC that stops
