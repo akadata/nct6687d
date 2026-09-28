@@ -52,30 +52,39 @@ jobs:
           #
           # Both sides of the one version boundary the driver carries, 6.11
           # for platform_driver.remove.
-          - name: 5.15 (Ubuntu 22.04 LTS)
+          - name: Ubuntu 22.04 LTS
             image: ubuntu:22.04
             kver: 5.15.0-139-generic
-          - name: 6.8 (Ubuntu 24.04 LTS)
+          - name: Ubuntu 24.04 LTS
             image: ubuntu:24.04
             kver: 6.8.0-60-generic
 
           # >= 6.11: remove() returns void.
-          - name: 6.11 (Ubuntu 25.04)
+          - name: Ubuntu 25.04
             image: ubuntu:25.04
             kver: 6.11.0-28-generic
-          - name: 6.12 (Debian 13)
+          - name: Debian 13 (trixie)
             image: debian:trixie
             kver: 6.12.38+deb13-amd64
 
-          - name: 6.14 (Debian 13)
-            image: debian:trixie
-            kver: 6.14.0-1-amd64
-          - name: 6.17 (Fedora 42)
-            image: fedora:42
-            kver: 6.17.4-200.fc42.x86_64
-          - name: mainline
+          - name: Debian 13, newest kernel
             image: debian:trixie
             kver: tip
+          - name: Fedora 42
+            image: fedora:42
+            kver: 6.17.4-200.fc42.x86_64
+          # No mainline entry on purpose. Every image here ships a released
+          # kernel, so an entry labelled "mainline" would silently build the
+          # newest release and report it as something it is not. Testing a
+          # mainline kernel needs headers from a build of it, which is a
+          # different job with its own kernel.org plumbing.
+          #
+          # Entries are named for the distro release rather than a kernel
+          # version, because an image name is what is actually pinned here.
+          # Two entries once both named "6.14" and both built 6.12, which is
+          # the failure this naming avoids. Each job prints the kernel it
+          # resolved, so the coverage is visible in the log rather than
+          # asserted in the entry name.
 
     steps:
       - name: Check out
