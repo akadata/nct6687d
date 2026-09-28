@@ -11,15 +11,27 @@
  * Inspired of LibreHardwareMonitor
  * https://github.com/LibreHardwareMonitor/LibreHardwareMonitor
  *
- * Supports the following chips:
+ * Supported chips. The channel counts below are what this driver registers in
+ * sysfs, which is the same for every chip it drives: the tables in this file
+ * are not indexed per chip, and no register addresses here are chip-specific
+ * enough to extend them safely without a datasheet.
  *
  * Chip       #voltage   #fan    #pwm    #temp  chip ID
- * nct6683    14(1)      8       8       7      0xc732  (partial support)
- * nct6686d   21(1)      16      8       32(1)  0xd440
- * nct6687    14(1)      8       8       7      0xd592
+ * nct6683    14         8       8       7      0xc732  (partial support)
+ * nct6686d   14         8       8       7      0xd440  (detected only)
+ * nct6687    14         8       8       7      0xd592
  *
  * Notes:
- *	(1) Total number of voltage and 9 displayed.
+ *	- The Nct6686d is recognised and its hwmon device registered, but the
+ *	  channel set is the NCT6687 one. Its 16 fan headers and any additional
+ *	  monitoring channels are not implemented here.
+ *	- Every channel is registered unconditionally. A board that does not
+ *	  populate one still exposes it, and an unwired input reads back as
+ *	  0 mV or 0 rpm. See the hide_unused module parameter for what can be
+ *	  said about which channels the hardware actually enables.
+ *	- There is no current, power or energy support.
+ *	- tempN_max and tempN_min are the highest and lowest values observed
+ *	  since probe. They are not hardware limits and are not writable.
  */
 // #define DEBUG 1
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -247,14 +259,16 @@ static inline void superio_exit(int ioreg)
 
 #define NCT6687_HWM_CFG 0x180
 
+/*
+ * Per-channel enable registers, one bit per channel. These are the hardware's
+ * own answer to which channels the board actually populates, and are what the
+ * hide_unused module parameter uses. Their bit layout is not documented by
+ * Nuvoton; see the hide_unused comment for how the mask is interpreted and
+ * what is deliberately not inferred from it.
+ */
 #define NCT6687_REG_MON_CFG(x) (0x1a0 + (x))
 #define NCT6687_REG_FANIN_CFG(x) (0xA00 + (x))
 #define NCT6687_REG_FANOUT_CFG(x) (0x1d0 + (x))
-
-#define NCT6687_REG_TEMP_HYST(x) (0x330 + (x))	  /* 8 bit */
-#define NCT6687_REG_TEMP_MAX(x) (0x350 + (x))	  /* 8 bit */
-#define NCT6687_REG_MON_HIGH(x) (0x370 + (x) * 2) /* 8 bit */
-#define NCT6687_REG_MON_LOW(x) (0x371 + (x) * 2)  /* 8 bit */
 
 #define NCT6687_REG_FAN_MIN(x) (0x3b8 + (x) * 2) /* 16 bit */
 
@@ -280,12 +294,6 @@ static inline void superio_exit(int ioreg)
 #define NCT6687_REG_VERSION_HI 0x608
 #define NCT6687_REG_VERSION_LO 0x609
 
-#define NCT6687_REG_CR_CASEOPEN 0xe8
-#define NCT6687_CR_CASEOPEN_MASK (1 << 7)
-
-#define NCT6687_REG_CR_BEEP 0xe0
-#define NCT6687_CR_BEEP_MASK (1 << 6)
-
 #define EC_SPACE_PAGE_REGISTER_OFFSET 0x04
 #define EC_SPACE_INDEX_REGISTER_OFFSET 0x05
 #define EC_SPACE_DATA_REGISTER_OFFSET 0x06
@@ -298,7 +306,12 @@ struct voltage_reg
 	const char *label;
 };
 
-static struct voltage_reg nct6687_voltage_definition[] = {
+/*
+ * Read-only: this maps a sysfs channel index to the register it reads and the
+ * label it reports. Nothing in the driver writes to it, and making it const
+ * means the mapping cannot change at runtime by accident.
+ */
+static const struct voltage_reg nct6687_voltage_definition[] = {
 	// +12V
 	{
 		.reg = 0,
@@ -1394,11 +1407,20 @@ static inline void nct6687_init_device(struct nct6687_data *data)
 
 	pr_debug("nct6687_init_device\n");
 
-	/* Start hardware monitoring if needed */
+	/*
+	 * Start hardware monitoring if needed.
+	 *
+	 * Only bit 7 of NCT6687_HWM_CFG is defined by this driver; the meaning of
+	 * bits 0-6 is not, so a readback of 0xFF cannot be shown to be an error
+	 * and must not be treated as one here. It is logged instead, which gives
+	 * someone on an affected board the evidence to say more. inb_p() has no
+	 * status return, so there is nothing to check beyond the value itself.
+	 */
 	tmp = nct6687_read(data, NCT6687_HWM_CFG);
+	pr_debug("nct6687_init_device: NCT6687_HWM_CFG = 0x%02x\n", tmp);
 	if (!(tmp & 0x80))
 	{
-		pr_debug("nct6687_init_device: 0x%04x\n", tmp);
+		pr_debug("nct6687_init_device: enabling hardware monitoring\n");
 		nct6687_write(data, NCT6687_HWM_CFG, tmp | 0x80);
 	}
 
@@ -1522,6 +1544,11 @@ static int nct6687_probe(struct platform_device *pdev)
 	char build[16];
 
 	res = platform_get_resource(pdev, IORESOURCE_IO, 0);
+	if (!res) {
+		dev_err(dev, "no I/O resource found\n");
+		return -ENODEV;
+	}
+
 	if (!devm_request_region(dev, res->start, IOREGION_LENGTH, DRVNAME))
 		return -EBUSY;
 
