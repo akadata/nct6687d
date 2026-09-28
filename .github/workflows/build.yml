@@ -96,9 +96,19 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           want="${{ matrix.kver }}"
 
+          # A job container has no sudo and already runs as root; a hosted
+          # runner has sudo and is not root. This makes one script correct on
+          # both rather than every install having to check.
+          if command -v sudo >/dev/null 2>&1; then
+            SUDO=sudo
+          else
+            SUDO=
+          fi
+          echo "root: $(id -u), sudo: ${SUDO:-<none>}"
+
           if command -v dnf >/dev/null 2>&1; then
             pkgmgr=dnf
-            sudo dnf install -y bc elfutils-libelf-devel gcc git make
+            $SUDO dnf install -y bc elfutils-libelf-devel gcc git make
             # dnf names these kernel-devel-<version>.
             pick=""
             if [ "$want" != "tip" ] && dnf --quiet list --available "kernel-devel-${want}" >/dev/null 2>&1; then
@@ -112,11 +122,11 @@ jobs:
             fi
             [ -z "$pick" ] && { echo "::error::no kernel-devel in this image"; exit 1; }
             echo "installing: ${pick}"
-            sudo dnf install -y "$pick"
+            $SUDO dnf install -y "$pick"
           else
             pkgmgr=apt
-            sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends bc binutils gcc git kmod make
+            $SUDO apt-get update -qq
+            $SUDO apt-get install -y --no-install-recommends bc binutils gcc git kmod make
             # apt names these linux-headers-<version>. Container images lag
             # their archive, so an exact pin regularly 404s; fall back and say
             # so, because a stale pin is not a kernel incompatibility.
@@ -136,7 +146,7 @@ jobs:
               exit 1
             fi
             echo "installing: ${pick}"
-            sudo apt-get install -y --no-install-recommends "$pick"
+            $SUDO apt-get install -y --no-install-recommends "$pick"
           fi
           echo "package manager: ${pkgmgr}"
 
@@ -152,13 +162,10 @@ jobs:
           echo "building against: ${kver}"
           echo "kver=${kver}" >> "$GITHUB_OUTPUT"
 
-          # Two things a hosted runner has and a job container does not.
           # git is absent until this step installs it, and refuses the checkout
-          # as "dubious ownership" until safe.directory is set. The header
-          # install ran under sudo, so the kernel tree is root-owned while
-          # kbuild runs unprivileged.
+          # as "dubious ownership" until safe.directory is set.
           git config --global --add safe.directory "$(pwd)"
-          sudo chown -R "$(id -u):$(id -g)" "/lib/modules/${kver}" 2>/dev/null || true
+          $SUDO chown -R "$(id -u):$(id -g)" "/lib/modules/${kver}" 2>/dev/null || true
 
       - name: Build
         shell: bash
@@ -211,10 +218,10 @@ jobs:
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
+          $SUDO apt-get update -qq
+          $SUDO apt-get install -y --no-install-recommends \
             bc binutils dkms gcc git kmod make
-          sudo apt-get install -y --no-install-recommends "linux-headers-$(uname -r)"
+          $SUDO apt-get install -y --no-install-recommends "linux-headers-$(uname -r)"
 
       - name: Stage the sources the way dkms.conf expects
         shell: bash
