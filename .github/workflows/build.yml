@@ -107,7 +107,7 @@ jobs:
 
           if command -v dnf >/dev/null 2>&1; then
             pkgmgr=dnf
-            $SUDO dnf install -y bc elfutils-libelf-devel gcc git make
+            $SUDO dnf install -y bc elfutils-libelf-devel gcc git kmod make
             # dnf names these kernel-devel-<version>.
             pick=""
             if [ "$want" != "tip" ] && dnf --quiet list --available "kernel-devel-${want}" >/dev/null 2>&1; then
@@ -185,7 +185,11 @@ jobs:
           echo "resolved kernel: ${kver}"
           make kver="${kver}" build
           ls -l "build/${kver}/nct6687.ko"
-          modinfo "build/${kver}/nct6687.ko" | head -5
+          # modinfo ships in kmod on every distro here; if an image ever moves
+          # it again, the build has already succeeded, so do not fail the job
+          # over an informational line.
+          command -v modinfo >/dev/null 2>&1 && modinfo "build/${kver}/nct6687.ko" | head -5 \
+            || echo "modinfo not present; skipping module info"
 
       - name: Check for warnings
         shell: bash
