@@ -52,21 +52,17 @@ jobs:
             kver: 6.11.0-28-generic
           - name: 6.12 (Debian 13)
             container: debian:trixie
-            debian: true
             kver: 6.12.38+deb13-amd64
 
           # >= 6.13: both gates flip, hwmon-sysfs.h is required.
           - name: 6.14 (Debian 13 updates)
             container: debian:trixie
-            debian: true
             kver: 6.14.0-1-amd64
           - name: 6.17 (Fedora 42)
             container: fedora:42
-            fedora: true
             kver: 6.17.4-200.fc42.x86_64
           - name: tip (newest in image)
             container: debian:trixie
-            debian: true
             kver: tip
 
     steps:
@@ -75,109 +71,65 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install build dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          export DEBIAN_FRONTEND=noninteractive
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends bc binutils gcc kmod make
-          # No kernel headers here on purpose. The image's own kernel is not the
-          # one under test, so the resolve step below installs the specific
-          # kernel's headers after seeing what the archive offers. Naming a
-          # kernel in advance means a pin that 404s the day the image updates.
-          sudo apt-get install -y --no-install-recommends bc elfutils-dev || true
-
-      - name: Install build dependencies (Fedora)
-        if: matrix.fedora
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo dnf install -y bc elfutils-libelf-devel gcc git make
-          # dnf names these kernel-devel-<version>; the apt branch below cannot
-          # run on this image.
-          want="${{ matrix.kver }}"
-          pick=""
-          if [ "$want" != "tip" ] && dnf --quiet list --available "kernel-devel-${want}" >/dev/null 2>&1; then
-            pick="kernel-devel-${want}"
-          else
-            [ "$want" != "tip" ] && \
-              echo "::warning::kernel-devel-${want} is not in this image; using the newest available"
-          fi
-          if [ -z "$pick" ]; then
-            pick=$(dnf --quiet list --available kernel-devel 2>/dev/null \
-                  | awk '/^kernel-devel/ {print $1}' | sort -V | tail -1)
-          fi
-          if [ -z "$pick" ]; then
-            echo "::error::no kernel-devel available in this image"
-            exit 1
-          fi
-          echo "installing: ${pick}"
-          sudo dnf install -y "$pick"
-
-          kver=$(ls -1 /lib/modules 2>/dev/null | sort -V | tail -1)
-          if [ -z "$kver" ] || [ ! -d "/lib/modules/${kver}/build" ]; then
-            echo "::error::${pick} installed but /lib/modules has no build tree"
-            exit 1
-          fi
-          echo "building against: ${kver}"
-          echo "kver=${kver}" >> "$GITHUB_OUTPUT"
-
-      - name: Install headers for the kernel under test
+      # One step for every image, using whichever package manager is actually
+      # present. Gating on a matrix key with if: is unreliable here: a step so
+      # gated can run outside the job's container, which is how a Fedora entry
+      # ended up on an image with apt and no dnf.
+      - name: Install build dependencies and kernel headers
         id: kernels
-        if: ${{ !matrix.fedora }}
         shell: bash
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           want="${{ matrix.kver }}"
-          echo "requested: ${want}"
 
-          if [ -n "${FEDORA:-}" ]; then
+          if command -v dnf >/dev/null 2>&1; then
+            pkgmgr=dnf
+            sudo dnf install -y bc elfutils-libelf-devel gcc git make
             # dnf names these kernel-devel-<version>.
             pick=""
             if [ "$want" != "tip" ] && dnf --quiet list --available "kernel-devel-${want}" >/dev/null 2>&1; then
               pick="kernel-devel-${want}"
-            else
-              [ "$want" != "tip" ] && \
-                echo "::warning::kernel-devel-${want} is not in this image; using the newest available"
+            elif [ "$want" != "tip" ]; then
+              echo "::warning::kernel-devel-${want} unavailable; using newest in image"
             fi
             if [ -z "$pick" ]; then
               pick=$(dnf --quiet list --available kernel-devel 2>/dev/null \
                     | awk '/^kernel-devel/ {print $1}' | sort -V | tail -1)
             fi
-            if [ -z "$pick" ]; then
-              echo "::error::no kernel-devel available in this image"
-              exit 1
-            fi
+            [ -z "$pick" ] && { echo "::error::no kernel-devel in this image"; exit 1; }
             echo "installing: ${pick}"
             sudo dnf install -y "$pick"
           else
+            pkgmgr=apt
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends bc binutils gcc git kmod make
             # apt names these linux-headers-<version>. Container images lag
-            # their archive, so an exact pin regularly 404s; fall back rather
-            # than fail, and say so, because a missing pin is not a driver fault.
+            # their archive, so an exact pin regularly 404s; fall back and say
+            # so, because a stale pin is not a kernel incompatibility.
             pick=""
             if [ "$want" != "tip" ] && apt-cache show "linux-headers-${want}" >/dev/null 2>&1; then
               pick="linux-headers-${want}"
-            else
-              [ "$want" != "tip" ] && \
-                echo "::warning::linux-headers-${want} is not in this image's archive; using the newest available"
+            elif [ "$want" != "tip" ]; then
+              echo "::warning::linux-headers-${want} unavailable in this image; using newest"
             fi
             if [ -z "$pick" ]; then
               pick=$(apt-cache search --names-only '^linux-headers-[0-9]' \
                     | awk '{print $1}' | sort -V | tail -1)
             fi
             if [ -z "$pick" ]; then
-              echo "::error::no linux-headers package available in this image"
+              echo "::error::no linux-headers package in this image"
               apt-cache search --names-only linux-headers | head -5 || true
               exit 1
             fi
             echo "installing: ${pick}"
             sudo apt-get install -y --no-install-recommends "$pick"
           fi
+          echo "package manager: ${pkgmgr}"
 
-          # Trust the directory that appeared, not the name we asked for: the
-          # metapackage form installs a differently-versioned directory.
+          # Trust the directory that appeared, not the name requested: the
+          # metapackage form installs a differently-versioned directory, and
+          # building against a mismatched kver is silently wrong.
           kver=$(ls -1 /lib/modules 2>/dev/null | sort -V | tail -1)
           if [ -z "$kver" ] || [ ! -d "/lib/modules/${kver}/build" ]; then
             echo "::error::${pick} installed but /lib/modules has no build tree"
